@@ -2,9 +2,7 @@
 """
 VeilNet - Anonymous Network Intelligence Platform
 Complete Anonymity Framework for OSINT Operations
-
-Author: Phoenix/Minthol
-License: MIT
+Version: 3.0 - By Phoenix/Minthol
 """
 
 import os
@@ -35,7 +33,6 @@ from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, field, asdict
-from enum import Enum
 import logging
 import yaml
 
@@ -151,6 +148,8 @@ class Anonymizer:
         self.current_ip = None
         self.circuit_id = None
         self.user_agents = self._load_user_agents()
+        self.connected = False
+        self.connection_time = None
         
     def _load_user_agents(self) -> List[str]:
         """Load user agents for rotation"""
@@ -162,10 +161,54 @@ class Anonymizer:
             'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
         ]
     
-    def start_tor(self) -> bool:
-        """Start Tor process and establish control connection"""
+    def check_tor_running(self) -> bool:
+        """Check if Tor is already running"""
         try:
-            logger.info("Starting Tor process...")
+            # Try to connect to control port
+            controller = stem.control.Controller.from_port(port=self.tor_config.control_port)
+            controller.authenticate(password=self.tor_config.password)
+            controller.close()
+            
+            # Check if SOCKS port is listening
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            result = sock.connect_ex(('127.0.0.1', self.tor_config.socks_port))
+            sock.close()
+            
+            return result == 0
+        except:
+            return False
+    
+    def connect_to_existing_tor(self) -> bool:
+        """Connect to already running Tor"""
+        try:
+            logger.info("Connecting to existing Tor...")
+            self.controller = stem.control.Controller.from_port(port=self.tor_config.control_port)
+            self.controller.authenticate(password=self.tor_config.password)
+            
+            # Setup session with SOCKS proxy
+            self._setup_session()
+            
+            # Get current IP
+            self.current_ip = self.get_current_ip()
+            self.connected = True
+            self.connection_time = time.time()
+            
+            logger.info(f"Connected to existing Tor. Exit IP: {self.current_ip}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to connect to existing Tor: {e}")
+            return False
+    
+    def start_tor(self) -> bool:
+        """Start Tor process or connect to existing"""
+        try:
+            # First check if Tor is already running
+            if self.check_tor_running():
+                logger.info("Tor already running, connecting...")
+                return self.connect_to_existing_tor()
+            
+            logger.info("Starting new Tor process...")
             
             # Create temporary data directory if not specified
             if not self.tor_config.data_dir:
@@ -208,6 +251,9 @@ class Anonymizer:
             
             # Get current IP
             self.current_ip = self.get_current_ip()
+            self.connected = True
+            self.connection_time = time.time()
+            
             logger.info(f"Tor started successfully. Exit IP: {self.current_ip}")
             
             return True
@@ -230,6 +276,9 @@ class Anonymizer:
             'http': f'socks5://127.0.0.1:{self.tor_config.socks_port}',
             'https': f'socks5://127.0.0.1:{self.tor_config.socks_port}'
         }
+        
+        # Set longer timeouts for Tor
+        self.session.timeout = self.proxy_config.timeout
         
         # Rotate user agent if configured
         if self.proxy_config.user_agent_rotate:
@@ -270,6 +319,16 @@ class Anonymizer:
         if not self.session:
             self._setup_session()
         return self.session
+    
+    def get_uptime(self) -> str:
+        """Get Tor uptime"""
+        if not self.connected or not self.connection_time:
+            return "Not connected"
+        seconds = int(time.time() - self.connection_time)
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        secs = seconds % 60
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
     
     def stop(self):
         """Stop Tor and cleanup"""
@@ -528,14 +587,17 @@ class DarkMarketMonitor:
     
     def monitor(self, keywords: List[str], interval: int = 3600):
         """Continuously monitor markets"""
-        while True:
-            for market in self.markets:
-                results = self.search_market(market, keywords)
-                if results:
-                    for result in results:
-                        logger.info(f"Found keyword in {result['market']}: {result['keyword']}")
-            
-            time.sleep(interval)
+        try:
+            while True:
+                for market in self.markets:
+                    results = self.search_market(market, keywords)
+                    if results:
+                        for result in results:
+                            logger.info(f"Found keyword in {result['market']}: {result['keyword']}")
+                
+                time.sleep(interval)
+        except KeyboardInterrupt:
+            logger.info("Market monitoring stopped")
 
 # ==================== ANONYMOUS FILE SHARING ====================
 
@@ -611,7 +673,8 @@ class VeilNet:
     """Main VeilNet application"""
     
     def __init__(self):
-        self.version = "3.0-PRODUCTION"
+        self.version = "3.0"
+        self.author = "Phoenix/Minthol"
         self.anonymizer = None
         self.onion_detector = None
         self.crawler = None
@@ -646,10 +709,10 @@ class VeilNet:
 ║      ╚████╔╝ ███████╗██║███████╗██║ ╚████║███████╗   ██║                    ║
 ║       ╚═══╝  ╚══════╝╚═╝╚══════╝╚═╝  ╚═══╝╚══════╝   ╚═╝                    ║
 ║                                                                              ║
-║                    【面纱网络】- Anonymous Network Intelligence               ║
+║                    Anonymous Network Intelligence                            ║
 ║                         Complete Anonymity Framework                         ║
 ║                                                                              ║
-║                    Version {self.version} • Production Ready                   ║
+║                    Version {self.version} • By {self.author}                   ║
 ║                                                                              ║
 ╚══════════════════════════════════════════════════════════════════════════╝{self.RESET}
         """
@@ -697,15 +760,22 @@ class VeilNet:
                 return False
         
         # Initialize anonymizer
-        print(f"{self.Y}[*] Starting Tor and configuring anonymity...{self.RESET}")
+        print(f"{self.Y}[*] Configuring anonymity...{self.RESET}")
         self.anonymizer = Anonymizer()
         
         try:
-            self.anonymizer.start_tor()
-            print(f"{self.G}[✓] Tor started successfully{self.RESET}")
+            # Try to connect to existing Tor first
+            if self.anonymizer.check_tor_running():
+                print(f"{self.Y}[*] Found existing Tor, connecting...{self.RESET}")
+                self.anonymizer.connect_to_existing_tor()
+            else:
+                print(f"{self.Y}[*] Starting new Tor process...{self.RESET}")
+                self.anonymizer.start_tor()
+            
+            print(f"{self.G}[✓] Tor connected successfully{self.RESET}")
             print(f"{self.G}[✓] Exit IP: {self.anonymizer.current_ip}{self.RESET}")
         except TorConnectionError as e:
-            print(f"{self.R}[✗] Failed to start Tor: {e}{self.RESET}")
+            print(f"{self.R}[✗] Failed to connect to Tor: {e}{self.RESET}")
             return False
         
         # Initialize components
@@ -720,6 +790,7 @@ class VeilNet:
     def interactive_menu(self):
         """Main interactive menu"""
         if not self.initialize():
+            input(f"{self.Y}[+] Press Enter to exit...{self.RESET}")
             return
         
         while True:
@@ -750,56 +821,60 @@ class VeilNet:
             print(f"{self.BOLD}{self.C}╚══════════════════════════════════════════════════════════╝{self.RESET}")
             print()
             
-            choice = input(f"{self.BOLD}{self.R}VeilNet@anonymous:~# {self.RESET}").strip()
+            choice = input(f"{self.BOLD}{self.R}VeilNet@{self.anonymizer.current_ip}:~# {self.RESET}").strip()
             
-            if choice == '1' or choice == '01':
-                self.show_anonymity_status()
-            elif choice == '2' or choice == '02':
-                self.rotate_circuit()
-            elif choice == '3' or choice == '03':
-                self.test_anonymity()
-            elif choice == '4' or choice == '04':
-                self.dark_web_scanner()
-            elif choice == '5' or choice == '05':
-                self.crawl_onion()
-            elif choice == '6' or choice == '06':
-                self.check_bitcoin()
-            elif choice == '7' or choice == '07':
-                self.check_ethereum()
-            elif choice == '8' or choice == '08':
-                self.monitor_markets()
-            elif choice == '9' or choice == '09':
-                self.generate_identity()
-            elif choice == '10':
-                self.view_identities()
-            elif choice == '11':
-                self.anonymous_upload()
-            elif choice == '12':
-                self.anonymous_download()
-            elif choice == '13':
-                self.extract_onions()
-            elif choice == '14':
-                self.batch_scan_onions()
-            elif choice == '15':
-                self.configure_settings()
-            elif choice == '16':
-                self.view_logs()
-            elif choice == '17':
-                self.export_data()
-            elif choice == '0' or choice == '00':
-                self.cleanup()
-                break
+            try:
+                if choice == '1' or choice == '01':
+                    self.show_anonymity_status()
+                elif choice == '2' or choice == '02':
+                    self.rotate_circuit()
+                elif choice == '3' or choice == '03':
+                    self.test_anonymity()
+                elif choice == '4' or choice == '04':
+                    self.dark_web_scanner()
+                elif choice == '5' or choice == '05':
+                    self.crawl_onion()
+                elif choice == '6' or choice == '06':
+                    self.check_bitcoin()
+                elif choice == '7' or choice == '07':
+                    self.check_ethereum()
+                elif choice == '8' or choice == '08':
+                    self.monitor_markets()
+                elif choice == '9' or choice == '09':
+                    self.generate_identity()
+                elif choice == '10':
+                    self.view_identities()
+                elif choice == '11':
+                    self.anonymous_upload()
+                elif choice == '12':
+                    self.anonymous_download()
+                elif choice == '13':
+                    self.extract_onions()
+                elif choice == '14':
+                    self.batch_scan_onions()
+                elif choice == '15':
+                    self.configure_settings()
+                elif choice == '16':
+                    self.view_logs()
+                elif choice == '17':
+                    self.export_data()
+                elif choice == '0' or choice == '00':
+                    self.cleanup()
+                    break
+            except Exception as e:
+                print(f"{self.R}[!] Error: {e}{self.RESET}")
+                logger.error(f"Error in menu option {choice}: {e}")
             
             input(f"{self.Y}[+] Press Enter to continue...{self.RESET}")
     
     def show_anonymity_status(self):
         """Show current anonymity status"""
         print(f"\n{self.BOLD}{self.C}ANONYMITY STATUS:{self.RESET}\n")
-        print(f"{self.G}Tor Status:{self.RESET} {'Connected' if self.anonymizer.controller else 'Disconnected'}")
+        print(f"{self.G}Tor Status:{self.RESET} {'Connected' if self.anonymizer.connected else 'Disconnected'}")
         print(f"{self.G}Current IP:{self.RESET} {self.anonymizer.current_ip}")
         print(f"{self.G}SOCKS Port:{self.RESET} {self.anonymizer.tor_config.socks_port}")
         print(f"{self.G}Control Port:{self.RESET} {self.anonymizer.tor_config.control_port}")
-        print(f"{self.G}Circuit Built:{self.RESET} {time.time() - self.anonymizer.controller.get_info('circuit-created') if self.anonymizer.controller else 'N/A'}")
+        print(f"{self.G}Uptime:{self.RESET} {self.anonymizer.get_uptime()}")
     
     def rotate_circuit(self):
         """Rotate Tor circuit"""
@@ -814,20 +889,14 @@ class VeilNet:
         print(f"{self.Y}[*] Testing anonymity...{self.RESET}")
         
         # Check IP
-        ip = self.anonymizer.get_current_ip()
+        ip = self.anonymizer.current_ip
         print(f"{self.G}Current IP: {ip}{self.RESET}")
         
         # Check DNS leak
         try:
-            import socket
-            original_getaddrinfo = socket.getaddrinfo
-            socket.getaddrinfo = lambda *args: [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (args[0], args[1]))]
-            
             response = self.anonymizer.session.get('https://ipleak.net/json/', timeout=10)
             data = response.json()
             print(f"{self.G}DNS Test:{self.RESET} {'Passed' if data.get('ip') == ip else 'Failed - Possible DNS Leak!'}")
-            
-            socket.getaddrinfo = original_getaddrinfo
         except:
             print(f"{self.Y}[!] DNS leak test failed{self.RESET}")
     
@@ -1078,6 +1147,7 @@ class VeilNet:
         """Export all collected data"""
         export_data = {
             'version': self.version,
+            'author': self.author,
             'timestamp': datetime.now().isoformat(),
             'identities': self.identity_manager.get_identities(),
             'onions': self.onion_detector.discovered if self.onion_detector else [],
@@ -1106,8 +1176,6 @@ def main():
         veilnet.interactive_menu()
     except KeyboardInterrupt:
         print(f"\n{veilnet.Y}[!] Interrupted by user{veilnet.RESET}")
-        if veilnet.anonymizer:
-            veilnet.anonymizer.stop()
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         import traceback
